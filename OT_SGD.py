@@ -4,7 +4,7 @@ from kernalization import KernelInitialization
 from evaluation import ObjectivesEval
 
 
-def gd(kernel_dim, source_dist_type='uniform', source_parameters=np.array([0, 1]), source_inverse_cdf=None, target_dist_type='uniform', target_parameters=np.array([0, 1]), target_inverse_cdf=None, kernel_type='polynomial', alpha=0.5, kernel_params=False, cost_type='quadratic', mcsample_size=100, threshold=10, gd_step=0-.001):
+def gd(kernel_dim, source_dist_type='uniform', source_parameters=np.array([0, 1]), source_inverse_cdf=None, target_dist_type='uniform', target_parameters=np.array([0, 1]), target_inverse_cdf=None, kernel_type='polynomial', alpha=0.5, kernel_params=False, cost_type='quadratic', mcsample_size=100, threshold=10, gd_step=0.001):
 
     source_sample_instance = SampleGeneration(sample_size=kernel_dim, dist_type=source_dist_type, parameters=source_parameters, inverse_cdf=source_inverse_cdf)
     target_sample_instance = SampleGeneration(sample_size=kernel_dim, dist_type=target_dist_type,

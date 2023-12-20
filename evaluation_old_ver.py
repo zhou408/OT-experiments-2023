@@ -4,6 +4,7 @@ from kernalization import FunctionApprox
 from kernalization import KernelInitialization
 from scipy.stats import norm
 import math
+import scipy.integrate as integrate
 from cmath import sqrt
 from cmath import exp
 
@@ -40,10 +41,10 @@ class CostFunction:
                 print('the input cost function is not callable')
 
     def cost_firstd(self, x, y):
-        # first derivative of the cost function with respect to evaluated at x-y.
+        # first derivative of the cost function with respect to y.
         if self.cost_function is None:
             if self.cost_type == 'quadratic':
-                return self.coe1 * 2 * (x - y)
+                return - 2 * self.coe1 * (x - y)
             else:
                 print('This cost type is not available as a default yet, please provide the exact cost function.')
         else:
@@ -142,7 +143,7 @@ def normal_second_d(x):
 
 class ConstraintEval:
 
-    def __init__(self, kernel_type='polynomial', alpha=0.5, kernel_params=False, weights=None, center_samples=None, dist_type='uniform', mcsample_size=10000, dist_parameters=np.array([0, 1]), inverse_cdf=None, x_perturb_size=0.5, w_perturb_size=0.05, target_density=norm.pdf, target_density_first_d=normal_first_d, target_density_second_d=normal_second_d, h_magnitude=1, domain_grid=np.arange(-5, 6, 1)):
+    def __init__(self, kernel_type='polynomial', alpha=0.5, kernel_params=False, weights=None, center_samples=None, dist_type='uniform', mcsample_size=10000, dist_parameters=np.array([0, 1]), inverse_cdf=None, x_perturb_size=0.5, w_perturb_size=0.05, target_density=norm.pdf, target_density_first_d=normal_first_d, target_density_second_d=normal_second_d, h_magnitude=1):
         self.kernel_type = kernel_type
         self.alpha = alpha
         self.kernel_params = kernel_params
@@ -164,13 +165,11 @@ class ConstraintEval:
         self.time_horizon = np.array([-10000, 10000])
         self.target_density_first_d = target_density_first_d
         self.target_density_second_d = target_density_second_d
-        self.domain_grid = domain_grid
 
     def fp_operator(self, x):
         mc_instance = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type,
                                        parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
         mc_samples = mc_instance.sampling()
-        # print(self.weights)
         kernel_instance = FunctionApprox(center_samples=self.center_samples, inputs=mc_samples, weights=self.weights,
                                          kernel=None, kernel_type=self.kernel_type, alpha=self.alpha,
                                          kernel_params=self.kernel_params)
@@ -183,10 +182,10 @@ class ConstraintEval:
         psf_at_x = (perturbed - unperturbed)/self.x_perturb_size - self.target_density(x)
         return psf_at_x
 
-    def check_feasible(self, weights, cons_tol):
+    def check_feasible(self, weights, domain_grid, cons_tol):
         cons_eval = []
-        for i in range(len(self.domain_grid)):
-            x = self.domain_grid[i]
+        for i in range(len(domain_grid)):
+            x = domain_grid[i]
             mc_instance = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type,
                                            parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
             mc_samples = mc_instance.sampling()
@@ -206,31 +205,151 @@ class ConstraintEval:
             print('not feasible, the constraints values are ', cons_eval)
         return cons_eval
 
+    def fp_fd_first_variation(self, x):
+        # using finite differencing on h
+        # the objective is the estimated gradient with respect to weights
+        objective = np.zeros(len(self.weights))
+        mc_instance = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type,
+                                       parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
+        mc_samples = mc_instance.sampling()
+        psf_at_x_w_unperturbed = self.fp_operator(x)
+        perturb_weights_init = self.weights
+        for i in range(len(self.weights)):
+            perturb_weights = perturb_weights_init
+            perturb_weights[i] += self.w_perturb_size
+            kernel_instance = FunctionApprox(center_samples=self.center_samples, inputs=mc_samples,
+                                             weights=perturb_weights,
+                                             kernel=None, kernel_type=self.kernel_type, alpha=self.alpha,
+                                             kernel_params=self.kernel_params)
+            predicts = kernel_instance.predict()
+            x_unperturbed = (predicts < x).sum()
+            x_perturbed = (predicts < x + self.x_perturb_size).sum()
+            psf_at_x_w_perturbed = (x_perturbed - x_unperturbed) / self.x_perturb_size
+            objective[i] = (psf_at_x_w_perturbed - psf_at_x_w_unperturbed)/self.w_perturb_size
+        return objective
+
+    def fp_fd_second_variation(self, x):
+
+        objective = np.zeros((len(self.weights), len(self.weights)))
+
+        def first_varr(y, weights):
+            obj = np.zeros(len(weights))
+            mc_instance = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type,
+                                           parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
+            mc_samples = mc_instance.sampling()
+            psf_at_x_w_unperturbed = self.fp_operator(y)
+            weights_init = weights
+            for i in range(len(weights)):
+                perturb_weights = weights_init
+                perturb_weights[i] += self.w_perturb_size
+                kernel_instance = FunctionApprox(center_samples=self.center_samples, inputs=mc_samples,
+                                                 weights=perturb_weights,
+                                                 kernel=None, kernel_type=self.kernel_type, alpha=self.alpha,
+                                                 kernel_params=self.kernel_params)
+                predicts = kernel_instance.predict()
+                x_unperturbed = (predicts < x).sum()
+                x_perturbed = (predicts < x + self.x_perturb_size).sum()
+                psf_at_x_w_perturbed = (x_perturbed - x_unperturbed) / self.x_perturb_size
+                obj[i] = (psf_at_x_w_perturbed - psf_at_x_w_unperturbed) / self.w_perturb_size
+            return obj
+        perturb_weights_init = self.weights
+        for j in range(len(self.weights)):
+            perturbed_weights = perturb_weights_init
+            perturbed_weights[j] += self.w_perturb_size
+            psfs_w_perturbed = first_varr(x, perturbed_weights)
+            psfs_w_unperturbed = first_varr(x, self.weights)
+            # print(j, psfs_w_perturbed, psfs_w_unperturbed)
+            objective[j] = (psfs_w_perturbed - psfs_w_unperturbed) / self.w_perturb_size
+        return objective
+
+    def fp_quad_first_variation(self, x):
+        mc_instance_s = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
+        mc_instance_h = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
+        mc_samples_s = mc_instance_s.sampling()
+        mc_samples_h = mc_instance_h.sampling()
+        dir_magnitude = math.sqrt(self.h_magnitude ** 2 / len(self.weights))
+        kernel_instance_s = FunctionApprox(center_samples=self.center_samples, inputs=mc_samples_s, weights=self.weights, kernel=None, kernel_type=self.kernel_type, alpha=self.alpha, kernel_params=self.kernel_params)
+        predicts_s = kernel_instance_s.predict()
+        expected_s = np.average(predicts_s)
+        expected_h = np.zeros(len(self.weights))
+        objective = np.zeros(len(self.weights))
+        integration_error = np.zeros(len(self.weights))
+        for i in range(len(self.weights)):
+            direction = np.zeros(len(self.weights))
+            # print(np.real(dir_magnitude))
+            direction[i] = np.real(dir_magnitude)
+            kernel_instance_h = FunctionApprox(center_samples=self.center_samples, inputs=mc_samples_h, weights=direction, kernel=None, kernel_type=self.kernel_type, alpha=self.alpha, kernel_params=self.kernel_params)
+            predicts_h_entry = kernel_instance_h.predict()
+            expected_h_entry = np.average(predicts_h_entry)
+            expected_h[i] = expected_h_entry
+
+            def expected_long_entry(t):
+                return np.average(1j * t * np.exp(1j * t * (predicts_s - expected_s)) * (predicts_h_entry - expected_h_entry))
+            # expected_long.append(expected_long_entry)
+            # print(predicts_h_entry, expected_h)
+
+            def integrand_eval(t):
+                integrand = - 1 / (2 * math.pi) * np.exp(1j * t * x) * np.exp(- expected_s) * expected_long_entry(t) - self.target_density_first_d(x) * expected_h_entry
+                # integrand = -np.exp(1j * t * x) * np.exp(- expected_s) * t - self.target_density(x) * expected_h_entry
+                return integrand
+            obj_entry = integrate.quad(integrand_eval, self.time_horizon[0], self.time_horizon[1])
+            integration_error[i] = obj_entry[1]
+            objective[i] = obj_entry[0]
+        return objective
+
+    def fp_quad_second_variation(self, x):
+        mc_instance_s = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
+        mc_instance_h = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
+        mc_samples_s = mc_instance_s.sampling()
+        mc_samples_h = mc_instance_h.sampling()
+        dir_magnitude = math.sqrt(self.h_magnitude ** 2 / len(self.weights))
+        kernel_instance_s = FunctionApprox(center_samples=self.center_samples, inputs=mc_samples_s, weights=self.weights, kernel=None, kernel_type=self.kernel_type, alpha=self.alpha, kernel_params=self.kernel_params)
+        predicts_s = kernel_instance_s.predict()
+        expected_s = np.average(predicts_s)
+        expected_h = np.zeros(len(self.weights))
+        objective = np.zeros(len(self.weights))
+        integration_error = np.zeros(len(self.weights))
+        for i in range(len(self.weights)):
+            direction = np.zeros(len(self.weights))
+            # print(np.real(dir_magnitude))
+            direction[i] = np.real(dir_magnitude)
+            kernel_instance_h = FunctionApprox(center_samples=self.center_samples, inputs=mc_samples_h, weights=direction, kernel=None, kernel_type=self.kernel_type, alpha=self.alpha, kernel_params=self.kernel_params)
+            predicts_h_entry = kernel_instance_h.predict()
+            expected_h_entry = np.average(predicts_h_entry)
+            expected_h[i] = expected_h_entry
+
+            def expected_long_entry(t):
+                return np.average(np.exp(1j * t * (predicts_s - expected_s)) * (predicts_h_entry - expected_h_entry) * (t ** 2 * (predicts_h_entry - expected_h_entry) + 1j * expected_h_entry))
+            # expected_long.append(expected_long_entry)
+            # print(predicts_h_entry, expected_h)
+
+            def integrand_eval(t):
+                integrand = 1 / (2 * math.pi) * np.exp(1j * t * x) * np.exp(- expected_s) * expected_long_entry(t) + self.target_density_second_d(x) * expected_h_entry ** 2
+                # integrand = -np.exp(1j * t * x) * np.exp(- expected_s) * t - self.target_density(x) * expected_h_entry
+                return integrand
+            obj_entry = integrate.quad(integrand_eval, self.time_horizon[0], self.time_horizon[1])
+            integration_error[i] = obj_entry[1]
+            objective[i] = obj_entry[0]
+        return objective
+
     def fp_first_variation(self, t_arr=True):
         """
 
         :param t_arr: the t_array which is the frequency array
         :return: a k x len(t_arr) numpy array where k is the length of the gradient vector, number of kernels.
         len(t_arr) is the length of the inverse discrete fourier transform.
-
-        a_arr: the input vector of discrete inverse fourier transform (difft)
-        capital_a_arr : the output vector of difft
         """
 
         if t_arr:
-            arr1 = np.arange(0, self.domain_grid[-1]+1, 1)
-            arr2 = np.arange(self.domain_grid[0], 0, 1)
+            arr1 = np.arange(0, 11, 1)
+            arr2 = np.arange(-10, 0, 1)
             t_arr = np.concatenate((arr1, arr2))
             delta_t = 1
-            init_t = self.domain_grid[0]
-        else:
-            delta_t = t_arr[1] - t_arr[0]
-            init_t = t_arr[0]
+            init_t = arr2[0]
         mc_instance_s = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
-        # mc_instance_h = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
+        mc_instance_h = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
         mc_samples_s = mc_instance_s.sampling()
-        # mc_samples_h = mc_instance_h.sampling()
-        mc_samples_h = mc_samples_s
+        mc_samples_h = mc_instance_h.sampling()
         dir_magnitude = math.sqrt(self.h_magnitude ** 2 / len(self.weights))
         kernel_instance_s = FunctionApprox(center_samples=self.center_samples, inputs=mc_samples_s, weights=self.weights, kernel=None, kernel_type=self.kernel_type, alpha=self.alpha, kernel_params=self.kernel_params)
         predicts_s = kernel_instance_s.predict()
@@ -240,6 +359,7 @@ class ConstraintEval:
         integration_error = np.zeros(len(self.weights))
         for i in range(len(self.weights)):
             # for each i, objective[i] would be a len(t_arr) long np array.
+
             direction = np.zeros(len(self.weights))
             # print(np.real(dir_magnitude))
             direction[i] = np.real(dir_magnitude)
@@ -266,13 +386,14 @@ class ConstraintEval:
                 a_arr[j] = integrand_eval(t_arr[j])
             # if np.isinf(a_arr).sum() > 0:
             #     print("a_arr is", a_arr)
-            x_arr = np.zeros(len(t_arr))
-            g_prime_term = np.zeros(len(t_arr))
-            for j in range(len(t_arr)):
-                x_arr[j] = (j - len(t_arr)/2) / (len(t_arr)/2 * delta_t)
-                g_prime_term[j] = self.target_density_first_d(x_arr[j]) * expected_h_entry
-            capital_a_arr = np.fft.ifftshift(a_arr)
+            capital_a_arr = np.fft.ifft(a_arr)
             ifft_arr = capital_a_arr * delta_t * exp(1j * 2 * math.pi * init_t / (len(t_arr) * delta_t))
+
+            g_prime_term = np.zeros(len(t_arr))
+            # not sure about this
+            for j in range(len(t_arr)):
+                x = (j - len(t_arr)/2) / (len(t_arr)/2 * delta_t)
+                g_prime_term[j] = self.target_density_first_d(x) * expected_h_entry
             objective.append(ifft_arr + g_prime_term)
         x_arr = np.arange(0, len(t_arr), 1)
         return [np.array(objective), x_arr]
@@ -286,19 +407,12 @@ class ConstraintEval:
         """
 
         if t_arr:
-            # arr1 = np.arange(0, 11, 1)
-            # arr2 = np.arange(-10, 0, 1)
-            # t_arr = np.concatenate((arr1, arr2))
-            # delta_t = 1
-            # init_t = arr2[0]
-            arr1 = np.arange(0, self.domain_grid[-1] + 1, 1)
-            arr2 = np.arange(self.domain_grid[0], 0, 1)
+            arr1 = np.arange(0, 11, 1)
+            arr2 = np.arange(-10, 0, 1)
             t_arr = np.concatenate((arr1, arr2))
             delta_t = 1
-            init_t = self.domain_grid[0]
-        else:
-            delta_t = t_arr[1] - t_arr[0]
-            init_t = t_arr[0]
+            init_t = arr2[0]
+
         mc_instance_s = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
         mc_instance_h = SampleGeneration(sample_size=self.mcsample_size, dist_type=self.dist_type, parameters=self.dist_parameters, inverse_cdf=self.inverse_cdf)
         mc_samples_s = mc_instance_s.sampling()
@@ -343,11 +457,9 @@ class ConstraintEval:
                 a_arr = np.zeros(len(t_arr), dtype='complex64')
                 for ele in range(len(t_arr)):
                     a_arr[ele] = integrand_eval(t_arr[ele])
-                capital_a_arr = np.fft.ifftshift(a_arr)
-                ifft_arr = np.zeros(len(capital_a_arr), dtype='complex_')
-                for n in range(len(capital_a_arr)):
-                    ifft_arr[n] = capital_a_arr[n] * delta_t * exp(1j * 2 * math.pi * self.domain_grid[n] * init_t
-                                                                   / (len(t_arr) * delta_t))
+                capital_a_arr = np.fft.ifft(a_arr)
+                ifft_arr = capital_a_arr * delta_t * exp(1j * 2 * math.pi * init_t / (len(t_arr) * delta_t))
+
                 g_prime_term = np.zeros(len(t_arr))
                 # not sure about this
                 for ele in range(len(t_arr)):
@@ -374,8 +486,7 @@ class ConstraintEval:
 # print(weight.shape, source.shape, inputs.shape, pre.shape)
 # obj = ObjectivesEval(weights=weight)
 # fun_val = obj.objective_fun()
-# first = obj
-# first_variation()
+# first = obj.first_variation()
 # cons = ConstraintEval(weights=weight)
 # psf = cons.fp_first_variation(1)
 # print(weight)

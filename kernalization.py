@@ -1,8 +1,10 @@
 import numpy as np
+import math
 from sklearn.metrics import mean_squared_error
 from sklearn.kernel_ridge import KernelRidge
 from sklearn.metrics.pairwise import PAIRWISE_KERNEL_FUNCTIONS, pairwise_kernels
 import matplotlib.pyplot as plt
+from scipy.spatial import distance
 
 
 class SampleGeneration:
@@ -23,6 +25,16 @@ class SampleGeneration:
             self.samples = np.random.uniform(self.parameters[0], self.parameters[1], self.sample_size)
         elif self.dist_name == 'normal':
             self.samples = np.random.normal(self.parameters[0], self.parameters[1], self.sample_size)
+        elif self.dist_name == 'gaussian_mix':
+        # format of the parameter is np.array([weight1, mean1, std1, mean2, std2])
+            types = np.random.binomial(size=self.sample_size, n=1, p=self.parameters[0])
+            samples = np.zeros(self.sample_size)
+            for i in range(self.sample_size):
+                if types[i] > 0.5:
+                    samples[i] = np.random.normal(self.parameters[1], self.parameters[2])
+                else:
+                    samples[i] = np.random.normal(self.parameters[3], self.parameters[4])
+            self.samples = samples
         else:
             print('no inverse cdf or distribution specified.')
         return self.samples
@@ -75,6 +87,12 @@ class KernelInitialization:
         return self.weights
 
 
+def exponential_kernel(x1, x2, bandwidth):
+    # the exponential kernel function used in Genevey & Culturi.
+    val = math.exp(-distance.euclidean(x1, x2) ** 2 / bandwidth)
+    return val
+
+
 class FunctionApprox:
 
     def __init__(self, center_samples, inputs, weights, kernel=None, kernel_type='polynomial', alpha=0.5, kernel_params=False):
@@ -87,20 +105,32 @@ class FunctionApprox:
         self.weights = weights
         if not kernel_params:
             self.kernel_params = {'gamma': 1, 'degree': 3, 'coef0': 1}
+            self.gamma = self.kernel_params['gamma']
+            self.degree = self.kernel_params['degree']
+            self.coef0 = self.kernel_params['coef0']
         else:
             self.kernel_params = kernel_params
-        self.gamma = self.kernel_params['gamma']
-        self.degree = self.kernel_params['degree']
-        self.coef0 = self.kernel_params['coef0']
+            self.gamma = None
+            self.degree = None
+            self.coef0 = None
         self.weights = weights
         self.k = None
 
     def get_kernel(self):
+        # return the inputs dim x center dim matrix
+
         x = self.center_samples
         y = self.inputs
         if callable(self.kernel):
             params = self.kernel_params or {}
             k = pairwise_kernels(y, x, metric=self.kernel, filter_params=True, **params)
+        elif self.kernel_type == "exponential":
+            params = self.kernel_params
+
+            def expo_ker(x1, x2):
+                val = exponential_kernel(x1, x2, params["bandwidth"])
+                return val
+            k = pairwise_kernels(y, x, metric=expo_ker, filter_params=True)
         else:
             params = {"gamma": self.gamma, "degree": self.degree, "coef0": self.coef0}
             k = pairwise_kernels(y, x, metric=self.kernel_type, filter_params=True, **params)
@@ -109,16 +139,22 @@ class FunctionApprox:
 
     def predict(self):
         self.get_kernel()
-        return np.dot(self.k, self.weights)
+        prediction = np.dot(self.k, self.weights)
+        # if prediction[0] == np.nan or math.isnan(prediction[0]):
+        #     print(self.k, self.weights)
+        return prediction
 
 
-c = SampleGeneration(sample_size=10)
-source = c.sampling()
-target = c.sampling()
+c = SampleGeneration(sample_size=20)
+b = SampleGeneration(sample_size=10)
+source = b.sampling()
+target = b.sampling()
 ker = KernelInitialization(source, target)
 weights = ker.regression_init()
 # print(weights)
 inputs = c.sampling()
 fun = FunctionApprox(source, inputs, weights)
 pre = fun.predict()
-# print(pre)
+# fun.get_kernel()
+kk = fun.k
+# print(kk.shape, weights.shape, np.dot(kk, weights))
